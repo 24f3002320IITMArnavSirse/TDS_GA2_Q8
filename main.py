@@ -11,7 +11,7 @@ from llm_service import extract_with_llm
 from models import ExtractRequest, InvoiceExtraction
 from parser import parse_invoice
 
-app = FastAPI(title="Local LLM Structured-Output Service")
+app = FastAPI(title="Local LLM Structured-Output Service", redirect_slashes=False)
 
 
 @app.exception_handler(RequestValidationError)
@@ -97,6 +97,8 @@ async def extract_invoice(text: str) -> Optional[InvoiceExtraction]:
 
 
 @app.post("/extract", response_model=InvoiceExtraction)
+@app.post("/extract/", response_model=InvoiceExtraction, include_in_schema=False)
+@app.post("/", response_model=InvoiceExtraction, include_in_schema=False)
 async def extract(request: ExtractRequest):
     result = await extract_invoice(request.text)
     if result is None:

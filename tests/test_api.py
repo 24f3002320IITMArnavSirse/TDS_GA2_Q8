@@ -247,6 +247,30 @@ def test_health_endpoint():
     assert response.status_code == 200
 
 
+def test_post_root_extract_alias():
+    text = (
+        "Vendor: Root-Alias Corp.\n"
+        "Invoice Date: 2026-05-10\n"
+        "Total Due: $250.00"
+    )
+    response = client.post("/", json={"text": text})
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data.keys()) == EXPECTED_KEYS
+    assert "Root-Alias Corp." in data["vendor"]
+
+
+def test_post_extract_trailing_slash():
+    text = (
+        "Vendor: Slash-Test Ltd.\n"
+        "Invoice Date: 2026-05-11\n"
+        "Total Due: $99.00"
+    )
+    response = client.post("/extract/", json={"text": text})
+    assert response.status_code == 200
+    assert set(response.json().keys()) == EXPECTED_KEYS
+
+
 def test_amount_is_numeric_not_string():
     text = "Vendor: Co.\nInvoice Date: 2026-02-02\nTotal: $99.99"
     response = client.post("/extract", json={"text": text})
