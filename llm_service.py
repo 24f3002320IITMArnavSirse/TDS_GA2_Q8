@@ -12,6 +12,7 @@ from models import InvoiceExtraction
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b")
 OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "5"))
+OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "false").lower() in ("1", "true", "yes")
 
 EXTRACTION_PROMPT = (
     "You are an invoice extraction engine. Extract only facts explicitly present "
@@ -70,6 +71,9 @@ def _coerce_extraction(data: dict) -> Optional[InvoiceExtraction]:
 
 
 async def extract_with_llm(text: str) -> Optional[InvoiceExtraction]:
+    if not OLLAMA_ENABLED:
+        return None
+
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": EXTRACTION_PROMPT.format(text=text),

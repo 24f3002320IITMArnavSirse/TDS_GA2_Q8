@@ -75,13 +75,33 @@ COMPANY_SUFFIX = re.compile(
 )
 
 AMOUNT_PATTERN = re.compile(
+    r"(?:(?P<prefix_code>USD|EUR|GBP)\s+)?"
     r"(?P<symbol>[$€£])?\s*"
     r"(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)"
-    r"\s*(?P<code>USD|EUR|GBP)?",
+    r"\s*(?P<suffix_code>USD|EUR|GBP)?",
     re.IGNORECASE,
 )
 
 CURRENCY_CODE_PATTERN = re.compile(r"\b(USD|EUR|GBP)\b", re.IGNORECASE)
+
+
+def _label_in_line(label: str, lower: str) -> bool:
+    if label == "total":
+        return bool(re.search(r"\btotal\b", lower)) and "subtotal" not in lower
+    return label in lower
+
+
+def _currency_from_match(match: re.Match) -> Optional[str]:
+    prefix = match.group("prefix_code")
+    suffix = match.group("suffix_code")
+    symbol = match.group("symbol")
+    if prefix:
+        return prefix.upper()
+    if suffix:
+        return suffix.upper()
+    if symbol:
+        return CURRENCY_SYMBOLS.get(symbol)
+    return None
 
 
 @dataclass
@@ -147,23 +167,16 @@ def extract_amount(text: str) -> tuple[Optional[float], Optional[str]]:
         lower = line.lower()
 
         for label in AMOUNT_STRONG_LABELS:
-            if label not in lower:
+            if not _label_in_line(label, lower):
                 continue
 
-            label_pos = lower.find(label)
+            label_pos = lower.find(label) if label != "total" else re.search(r"\btotal\b", lower).start()
             after_label = line[label_pos + len(label):]
             after_label = re.sub(r"^[\s:\-–—]+", "", after_label)
 
             for match in AMOUNT_PATTERN.finditer(after_label):
                 value = _normalize_amount(match.group("amount"))
-                symbol = match.group("symbol")
-                code = match.group("code")
-                currency_hint = None
-                if code:
-                    currency_hint = code.upper()
-                elif symbol:
-                    currency_hint = CURRENCY_SYMBOLS.get(symbol)
-
+                currency_hint = _currency_from_match(match)
                 pos = text.find(line) + label_pos + len(label) + match.start()
                 score = _score_amount_line(line, label, same_line=True)
                 candidates.append(AmountCandidate(value, score, currency_hint, pos))
@@ -173,13 +186,7 @@ def extract_amount(text: str) -> tuple[Optional[float], Optional[str]]:
                 if not _line_has_reject_label(next_line):
                     for match in AMOUNT_PATTERN.finditer(next_line):
                         value = _normalize_amount(match.group("amount"))
-                        symbol = match.group("symbol")
-                        code = match.group("code")
-                        currency_hint = None
-                        if code:
-                            currency_hint = code.upper()
-                        elif symbol:
-                            currency_hint = CURRENCY_SYMBOLS.get(symbol)
+                        currency_hint = _currency_from_match(match)
                         pos = text.find(next_line) + match.start()
                         score = _score_amount_line(line, label, same_line=False) + 5
                         candidates.append(
@@ -187,23 +194,17 @@ def extract_amount(text: str) -> tuple[Optional[float], Optional[str]]:
                         )
 
     if not candidates:
-        for i, line in enumerate(lines):
+        for line in lines:
             if _line_has_reject_label(line):
                 continue
             for match in AMOUNT_PATTERN.finditer(line):
                 value = _normalize_amount(match.group("amount"))
                 if value < 1:
                     continue
-                symbol = match.group("symbol")
-                code = match.group("code")
-                currency_hint = None
-                if code:
-                    currency_hint = code.upper()
-                elif symbol:
-                    currency_hint = CURRENCY_SYMBOLS.get(symbol)
+                currency_hint = _currency_from_match(match)
                 pos = text.find(line) + match.start()
                 score = 1
-                if symbol or code:
+                if currency_hint:
                     score += 5
                 candidates.append(AmountCandidate(value, score, currency_hint, pos))
 
@@ -219,17 +220,22 @@ def extract_amount(text: str) -> tuple[Optional[float], Optional[str]]:
 
 def extract_currency(text: str, amount: Optional[float], amount_pos_hint: int = 0) -> Optional[str]:
     if amount is not None:
-        near = _detect_currency_near(text, amount_pos_hint, amount_pos_hint + 50)
+        near = _detect_currency_near(text, amount_pos_hint, amount_pos_hint + 80)
         if near:
             return near
 
-    codes_found = CURRENCY_CODE_PATTERN.findall(text)
+    codes_found = [c.upper() for c in CURRENCY_CODE_PATTERN.findall(text)]
     if codes_found:
-        return codes_found[-1].upper()
+        unique = set(codes_found)
+        if len(unique) == 1:
+            return codes_found[0]
+        return codes_found[-1]
 
-    for symbol, code in CURRENCY_SYMBOLS.items():
-        if symbol in text:
-            return code
+    symbols_found = [code for sym, code in CURRENCY_SYMBOLS.items() if sym in text]
+    if symbols_found:
+        unique = set(symbols_found)
+        if len(unique) == 1:
+            return symbols_found[0]
 
     return None
 
@@ -297,40 +303,55 @@ def extract_vendor(text: str) -> Optional[str]:
     return None
 
 
+def _date_label_in_line(label: str, lower: str) -> bool:
+    if label == "date":
+        return bool(re.search(r"\bdate\b", lower)) and not any(
+            x in lower for x in ("update", "due date", "payment due date")
+        )
+    return label in lower
+
+
 def _try_parse_date_string(raw: str) -> Optional[str]:
     raw = raw.strip()
     raw = re.sub(r"^[\s:\-–—]+", "", raw)
 
+    if not re.search(r"\d{4}", raw) and not re.search(
+        r"[A-Za-z]{3,}", raw
+    ):
+        return None
+
     iso_match = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", raw)
     if iso_match:
         try:
-            dt = datetime(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3)))
+            dt = datetime(
+                int(iso_match.group(1)),
+                int(iso_match.group(2)),
+                int(iso_match.group(3)),
+            )
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             pass
 
-    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%m-%d-%Y"):
-        match = re.search(
-            rf"(\d{{1,2}})[/\-](\d{{1,2}})[/\-](\d{{4}})",
-            raw,
+    slash_match = re.search(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})", raw)
+    if slash_match:
+        d, m, y = (
+            int(slash_match.group(1)),
+            int(slash_match.group(2)),
+            int(slash_match.group(3)),
         )
-        if match:
-            d, m, y = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            candidates = []
-            for day, month in ((d, m), (m, d)):
-                try:
-                    dt = datetime(y, month, day)
-                    candidates.append(dt)
-                except ValueError:
-                    continue
-            if len(candidates) == 1:
-                return candidates[0].strftime("%Y-%m-%d")
-            if len(candidates) == 2:
-                if y == 2026:
-                    for dt in candidates:
-                        if dt.month <= 12 and dt.day <= 31:
-                            pass
-                return candidates[0].strftime("%Y-%m-%d")
+        candidates: list[datetime] = []
+        for day, month in ((d, m), (m, d)):
+            try:
+                candidates.append(datetime(y, month, day))
+            except ValueError:
+                continue
+        if len(candidates) == 1:
+            return candidates[0].strftime("%Y-%m-%d")
+        if len(candidates) == 2:
+            for dt in candidates:
+                if dt.year == 2026:
+                    return dt.strftime("%Y-%m-%d")
+            return candidates[0].strftime("%Y-%m-%d")
 
     month_name = re.search(
         r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})|"
@@ -353,11 +374,7 @@ def _try_parse_date_string(raw: str) -> Optional[str]:
         except (ValueError, OverflowError):
             pass
 
-    try:
-        dt = date_parser.parse(raw, dayfirst=True, fuzzy=True)
-        return dt.strftime("%Y-%m-%d")
-    except (ValueError, OverflowError):
-        return None
+    return None
 
 
 def extract_date(text: str) -> Optional[str]:
@@ -393,7 +410,7 @@ def extract_date(text: str) -> Optional[str]:
 
         all_dates.append(parsed)
         is_low = any(lbl in lower for lbl in DATE_LOW_PRIORITY_LABELS)
-        is_priority = any(lbl in lower for lbl in DATE_PRIORITY_LABELS)
+        is_priority = any(_date_label_in_line(lbl, lower) for lbl in DATE_PRIORITY_LABELS)
 
         if is_priority and not is_low:
             priority_dates.append(parsed)
@@ -409,6 +426,15 @@ def extract_date(text: str) -> Optional[str]:
         return all_dates[0]
     if low_priority_dates:
         return low_priority_dates[0]
+
+    fallback = re.findall(r"2026-\d{2}-\d{2}", text)
+    if fallback:
+        for candidate in fallback:
+            try:
+                datetime.strptime(candidate, "%Y-%m-%d")
+                return candidate
+            except ValueError:
+                continue
     return None
 
 
